@@ -45,7 +45,11 @@ imap-next = { path = ".", features = ["tag_generator"] }
 rand = "0.8.5"
 tokio = { version = "1.39.3", features = ["full"] }
 
+[patch.crates-io]
+imap-codec = { git = "https://github.com/duesee/imap-codec", branch = "jakoschiko_poison-message" }
+
 [workspace]
+
 resolver = "2"
 members = [
     "integration-test",
