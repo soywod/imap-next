@@ -7,6 +7,7 @@ use bytes::{Buf, BufMut, BytesMut};
 #[cfg(debug_assertions)]
 use imap_codec::imap_types::utils::escape_byte_string;
 use thiserror::Error;
+use tokio_rustls::rustls;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
