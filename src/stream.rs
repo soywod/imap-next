@@ -1,18 +1,18 @@
-use std::{
-    convert::Infallible,
-    io::{ErrorKind, Read, Write},
-};
+use std::io::{ErrorKind, Read, Write};
 
 use bytes::{Buf, BufMut, BytesMut};
 #[cfg(debug_assertions)]
 use imap_codec::imap_types::utils::escape_byte_string;
 use thiserror::Error;
-use tokio_rustls::rustls;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpStream,
+    },
     select,
 };
+use tokio_rustls::rustls;
 use tokio_rustls::TlsStream;
 #[cfg(debug_assertions)]
 use tracing::trace;
@@ -20,91 +20,59 @@ use tracing::trace;
 use crate::{Interrupt, Io, State};
 
 pub struct Stream {
-    stream: TcpStream,
-    tls: Option<rustls::Connection>,
+    kind: StreamKind,
     read_buffer: BytesMut,
     write_buffer: BytesMut,
 }
 
+pub enum StreamKind {
+    Tcp(OwnedReadHalf, OwnedWriteHalf),
+    Tls(
+        ReadHalf<TlsStream<TcpStream>>,
+        WriteHalf<TlsStream<TcpStream>>,
+    ),
+}
+
 impl Stream {
     pub fn insecure(stream: TcpStream) -> Self {
+        let (r, w) = stream.into_split();
+
         Self {
-            stream,
-            tls: None,
+            kind: StreamKind::Tcp(r, w),
             read_buffer: BytesMut::default(),
             write_buffer: BytesMut::default(),
         }
     }
 
     pub fn tls(stream: TlsStream<TcpStream>) -> Self {
-        // We want to use `TcpStream::split` for handling reading and writing separately,
-        // but `TlsStream` does not expose this functionality. Therefore, we destruct `TlsStream`
-        // into `TcpStream` and `rustls::Connection` and handling them ourselves.
-        //
-        // Some notes:
-        //
-        // - There is also `tokio::io::split` which works for all kind of streams. But this
-        //   involves too much scary magic because its use-case is reading and writing from
-        //   different threads. We prefer to use the more low-level `TcpStream::split`.
-        //
-        // - We could get rid of `TlsStream` and construct `rustls::Connection` directly.
-        //   But `TlsStream` is still useful because it gives us the guarantee that the handshake
-        //   was already handled properly.
-        //
-        // - In the long run it would be nice if `TlsStream::split` would exist and we would use
-        //   it because `TlsStream` is better at handling the edge cases of `rustls`.
-        let (stream, tls) = match stream {
-            TlsStream::Client(stream) => {
-                let (stream, tls) = stream.into_inner();
-                (stream, rustls::Connection::Client(tls))
-            }
-            TlsStream::Server(stream) => {
-                let (stream, tls) = stream.into_inner();
-                (stream, rustls::Connection::Server(tls))
-            }
-        };
+        let (r, w) = tokio::io::split(stream);
 
         Self {
-            stream,
-            tls: Some(tls),
+            kind: StreamKind::Tls(r, w),
             read_buffer: BytesMut::default(),
             write_buffer: BytesMut::default(),
         }
     }
 
-    pub async fn flush(&mut self) -> Result<(), Error<Infallible>> {
-        // Flush TLS
-        if let Some(tls) = &mut self.tls {
-            tls.writer().flush()?;
-            encrypt(tls, &mut self.write_buffer, Vec::new())?;
-        }
+    // pub async fn flush(&mut self) -> Result<(), Error<Infallible>> {
+    //     // Flush TLS
+    //     if let Some(tls) = &mut self.tls {
+    //         tls.writer().flush()?;
+    //         encrypt(tls, &mut self.write_buffer, Vec::new())?;
+    //     }
 
-        // Flush TCP
-        write(&mut self.stream, &mut self.write_buffer).await?;
-        self.stream.flush().await?;
+    //     // Flush TCP
+    //     write(&mut self.stream, &mut self.write_buffer).await?;
+    //     self.stream.flush().await?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     pub async fn next<F: State>(&mut self, mut state: F) -> Result<F::Event, Error<F::Error>> {
         let event = loop {
-            match &mut self.tls {
-                None => {
-                    // Provide input bytes to the client/server
-                    if !self.read_buffer.is_empty() {
-                        state.enqueue_input(&self.read_buffer);
-                        self.read_buffer.clear();
-                    }
-                }
-                Some(tls) => {
-                    // Decrypt input bytes
-                    let plain_bytes = decrypt(tls, &mut self.read_buffer)?;
-
-                    // Provide input bytes to the client/server
-                    if !plain_bytes.is_empty() {
-                        state.enqueue_input(&plain_bytes);
-                    }
-                }
+            if !self.read_buffer.is_empty() {
+                state.enqueue_input(&self.read_buffer);
+                self.read_buffer.clear();
             }
 
             // Progress the client/server
@@ -122,38 +90,38 @@ impl Stream {
                 Interrupt::Error(err) => return Err(Error::State(err)),
             };
 
-            match &mut self.tls {
-                None => {
-                    // Handle the output bytes from the client/server
-                    if let Io::Output(bytes) = io {
-                        self.write_buffer.extend(bytes);
-                    }
+            match io {
+                Io::Output(bytes) if !bytes.is_empty() => {
+                    self.write_buffer.extend(bytes);
                 }
-                Some(tls) => {
-                    // Handle the output bytes from the client/server
-                    let plain_bytes = if let Io::Output(bytes) = io {
-                        bytes
-                    } else {
-                        Vec::new()
-                    };
-
-                    // Encrypt output bytes
-                    encrypt(tls, &mut self.write_buffer, plain_bytes)?;
-                }
-            }
+                _ => (),
+            };
 
             // Progress the stream
             if self.write_buffer.is_empty() {
-                read(&mut self.stream, &mut self.read_buffer).await?;
+                match &mut self.kind {
+                    StreamKind::Tcp(r, _) => {
+                        read(r, &mut self.read_buffer).await?;
+                    }
+                    StreamKind::Tls(r, _) => {
+                        read(r, &mut self.read_buffer).await?;
+                    }
+                }
             } else {
-                // We read and write the stream simultaneously because otherwise
-                // a deadlock between client and server might occur if both sides
-                // would only read or only write.
-                let (read_stream, write_stream) = self.stream.split();
-                select! {
-                    result = read(read_stream, &mut self.read_buffer) => result,
-                    result = write(write_stream, &mut self.write_buffer) => result,
-                }?;
+                match &mut self.kind {
+                    StreamKind::Tcp(r, w) => {
+                        select! {
+                            result = read(r, &mut self.read_buffer) => result,
+                            result = write(w, &mut self.write_buffer) => result,
+                        }?;
+                    }
+                    StreamKind::Tls(r, w) => {
+                        select! {
+                            result = read(r, &mut self.read_buffer) => result,
+                            result = write(w, &mut self.write_buffer) => result,
+                        }?;
+                    }
+                }
             };
         };
 
@@ -166,7 +134,7 @@ impl Stream {
     /// Note: Writing to or reading from the stream may introduce
     /// conflicts with `imap-next`.
     pub fn stream_mut(&mut self) -> &mut TcpStream {
-        &mut self.stream
+        panic!()
     }
 }
 
@@ -176,7 +144,7 @@ impl Stream {
 #[cfg(feature = "expose_stream")]
 impl From<Stream> for TcpStream {
     fn from(stream: Stream) -> Self {
-        stream.stream
+        panic!()
     }
 }
 
