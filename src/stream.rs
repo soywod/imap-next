@@ -1,7 +1,10 @@
 use std::io::ErrorKind;
 
 use buf_stream::futures::BufStream;
-use futures_util::io::{AsyncRead, AsyncWrite};
+use futures_util::{
+    io::{AsyncRead, AsyncWrite},
+    AsyncWriteExt,
+};
 use thiserror::Error;
 
 use crate::{Interrupt, Io, State};
@@ -12,9 +15,8 @@ pub struct Stream<S> {
 
 impl<S> Stream<S> {
     pub fn new(stream: S) -> Self {
-        Self {
-            stream: BufStream::new(stream),
-        }
+        let stream = BufStream::new(stream);
+        Self { stream }
     }
 }
 
@@ -37,8 +39,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
             };
 
             // Handle the output bytes from the client/server
-            if let Io::Output(bytes) = io {
-                self.stream.push_bytes(bytes);
+            if let Io::Output(ref bytes) = io {
+                self.stream.write(bytes).await?;
             }
 
             match self.stream.progress().await {
