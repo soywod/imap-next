@@ -1,22 +1,26 @@
-use std::io::ErrorKind;
-
-use buf_stream::futures::BufStream;
-use futures_util::{
-    io::{AsyncRead, AsyncWrite},
-    AsyncWriteExt,
-};
+use futures_util::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use thiserror::Error;
 
 use crate::{Interrupt, Io, State};
 
 pub struct Stream<S> {
-    stream: BufStream<S>,
+    stream: S,
+    buf: Vec<u8>,
 }
 
 impl<S> Stream<S> {
     pub fn new(stream: S) -> Self {
-        let stream = BufStream::new(stream);
-        Self { stream }
+        Self {
+            stream,
+            buf: vec![0; 1024].into(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize, stream: S) -> Self {
+        Self {
+            stream,
+            buf: vec![0; capacity].into(),
+        }
     }
 }
 
@@ -43,17 +47,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
                 self.stream.write(bytes).await?;
             }
 
-            match self.stream.progress().await {
-                Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-                    return Err(Error::Closed);
-                }
-                Err(err) => {
-                    return Err(Error::Io(err));
-                }
-                Ok(bytes) => {
-                    state.enqueue_input(bytes);
-                }
-            }
+            let n = self.stream.read(&mut self.buf).await?;
+            state.enqueue_input(&self.buf[..n]);
         };
 
         Ok(event)

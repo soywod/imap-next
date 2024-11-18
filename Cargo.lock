@@ -104,15 +104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "buf-stream"
-version = "0.1.0"
-source = "git+https://github.com/pimalaya/core#17cb7348d5e1fbd9bd7651c54b3de0ab8ddba72d"
-dependencies = [
- "futures-util",
- "tracing",
-]
-
-[[package]]
 name = "bytes"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -232,7 +223,6 @@ dependencies = [
 name = "imap-next"
 version = "0.2.0"
 dependencies = [
- "buf-stream",
  "futures-util",
  "imap-codec",
  "imap-next",
