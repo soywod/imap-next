@@ -22,6 +22,21 @@ impl<S> Stream<S> {
             buf: vec![0; capacity].into(),
         }
     }
+
+    #[cfg(feature = "expose_stream")]
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    #[cfg(feature = "expose_stream")]
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    #[cfg(feature = "expose_stream")]
+    pub fn into_inner(self) -> S {
+        self.stream
+    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
