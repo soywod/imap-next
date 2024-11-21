@@ -1,5 +1,6 @@
 use futures_util::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use thiserror::Error;
+use tracing::debug;
 
 use crate::{Interrupt, Io, State};
 
@@ -58,11 +59,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Stream<S> {
             };
 
             // Handle the output bytes from the client/server
-            if let Io::Output(ref bytes) = io {
-                self.stream.write(bytes).await?;
+            match io {
+                Io::Output(ref bytes) => {
+                    let n = self.stream.write(bytes).await?;
+                    debug!("wrote {n}/{} bytes", bytes.len());
+                }
+                Io::NeedMoreInput => {
+                    debug!("more input needed");
+                }
             }
 
             let n = self.stream.read(&mut self.buf).await?;
+            debug!("read {n}/{} bytes", self.buf.len());
             state.enqueue_input(&self.buf[..n]);
         };
 
